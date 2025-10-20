@@ -7,6 +7,7 @@ from services.notes_service import NotesService
 from notes_ui import NotesUI
 from dev_cli import DevCLI
 
+
 class RacconApp:
     def __init__(self):
         self.root = tk.Tk()
@@ -33,10 +34,10 @@ class RacconApp:
 
         # --- нижняя панель с кнопками ---
         bottom_frame = ttk.Frame(self.root)
-        bottom_frame.pack(fill="x", side="bottom", pady=6, padx=6)
+        bottom_frame.pack(fill="x", side="bottom", pady=4)
 
         dev_btn = ttk.Button(bottom_frame, text="Dev CLI", command=self.open_cli)
-        dev_btn.pack(side="right")
+        dev_btn.pack(side="right", padx=6)
 
     def open_cli(self):
         DevCLI(self.root, db=self.db, notes_service=self.notes_service)
