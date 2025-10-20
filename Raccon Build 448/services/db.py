@@ -1,44 +1,49 @@
-# services/db.py
 import sqlite3
-from typing import List, Tuple, Any, Optional
+from typing import Tuple, Iterable, Optional
+
 
 class Database:
-    def __init__(self, path: str = "raccon.db"):
+    def __init__(self, path: str):
         self.path = path
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        self._ensure_pragmas()
+        self._init_schema()
 
-    def _ensure_pragmas(self):
-        try:
-            cur = self.conn.cursor()
-            cur.execute("PRAGMA foreign_keys = ON;")
-            cur.close()
-        except Exception:
-            pass
-
-    def execute(self, query: str, params: Tuple = ()):
+    def _init_schema(self):
         cur = self.conn.cursor()
-        cur.execute(query, params)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
         self.conn.commit()
         cur.close()
 
-    def fetchall(self, query: str, params: Tuple = ()):
+    def execute(self, sql: str, params: Tuple = ()) -> None:
         cur = self.conn.cursor()
-        cur.execute(query, params)
+        cur.execute(sql, params)
+        self.conn.commit()
+        cur.close()
+
+    def fetchall(self, sql: str, params: Tuple = ()) -> Iterable[sqlite3.Row]:
+        cur = self.conn.cursor()
+        cur.execute(sql, params)
         rows = cur.fetchall()
         cur.close()
-        return [tuple(r) for r in rows]
+        return rows
 
-    def fetchone(self, query: str, params: Tuple = ()):
+    def fetchone(self, sql: str, params: Tuple = ()) -> Optional[sqlite3.Row]:
         cur = self.conn.cursor()
-        cur.execute(query, params)
+        cur.execute(sql, params)
         row = cur.fetchone()
         cur.close()
-        return tuple(row) if row else None
+        return row
 
     def close(self):
-        try:
-            self.conn.close()
-        except Exception:
-            pass
+        self.conn.close()

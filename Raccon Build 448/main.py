@@ -1,9 +1,5 @@
-# main.py
-from ui import RacconApp
-
-def main():
-    app = RacconApp()
-    app.run()
+from ui.main_ui import RacconApp
 
 if __name__ == "__main__":
-    main()
+    app = RacconApp(db_path="raccon.db")
+    app.run()
