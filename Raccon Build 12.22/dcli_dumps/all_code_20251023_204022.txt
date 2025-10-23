@@ -1,5 +1,5 @@
 All project .py files dump
-Generated: 2025-10-20T15:15:45.611522
+Generated: 2025-10-23T20:40:22.027458
 Project root: c:\Users\Q#\Desktop\Raccon Build 448
 
 
@@ -64,34 +64,57 @@ class Database:
 
 
 --- FILE: services\notes_service.py ---
+# services/notes_service.py
+import json
+import html
+import os
 from typing import List, Tuple, Optional
+from datetime import datetime
 from services.db import Database
 
 
 class NotesService:
     def __init__(self, db: Database):
         self.db = db
+        self._ensure_format_meta()
 
-    # Create
-    def create_note(self, title: str, content: str, tags: str) -> None:
+    def _ensure_format_meta(self):
+        try:
+            self.db.execute("ALTER TABLE notes ADD COLUMN format_meta TEXT NOT NULL DEFAULT '{}'")
+        except Exception:
+            pass
+
+    def create_note(self, title: str, content: str = "", tags: str = "", format_meta: str = "{}") -> None:
+        fm = self._normalize_format_meta(format_meta)
         self.db.execute(
-            "INSERT INTO notes(title, content, tags) VALUES (?, ?, ?)",
-            (title, content, tags)
+            "INSERT INTO notes(title, content, tags, format_meta, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            (title, content, tags, fm)
         )
 
-    # Read
     def get_all_notes(self) -> List[Tuple]:
-        rows = self.db.fetchall(
-            "SELECT id, title, tags, created_at FROM notes ORDER BY id DESC"
-        )
-        return [tuple(r) for r in rows]
+        rows = self.db.fetchall("SELECT id, title, tags, created_at FROM notes ORDER BY id DESC")
+        return [tuple(r) for r in rows] if rows else []
 
     def get_note_by_id(self, note_id: int) -> Optional[Tuple]:
-        row = self.db.fetchone(
-            "SELECT id, title, content, tags, created_at FROM notes WHERE id = ?",
-            (note_id,)
-        )
-        return tuple(row) if row else None
+        # Попробовать получить формат_meta вместе с остальными полями
+        try:
+            row = self.db.fetchone(
+                "SELECT id, title, content, tags, created_at, COALESCE(format_meta, '{}') as format_meta FROM notes WHERE id = ?",
+                (note_id,)
+            )
+            if row:
+                return tuple(row)
+            return None
+        except Exception:
+            # Если схема старая и column missing — вернуть 6-элементный кортеж с дефолтом
+            row = self.db.fetchone(
+                "SELECT id, title, content, tags, created_at FROM notes WHERE id = ?",
+                (note_id,)
+            )
+            if row:
+                vals = tuple(row)
+                return (*vals, "{}")
+            return None
 
     def search_notes(self, query: str) -> List[Tuple]:
         q = f"%{query}%"
@@ -99,18 +122,91 @@ class NotesService:
             "SELECT id, title, tags, created_at FROM notes WHERE title LIKE ? OR tags LIKE ? ORDER BY id DESC",
             (q, q)
         )
-        return [tuple(r) for r in rows]
+        return [tuple(r) for r in rows] if rows else []
 
-    # Update
-    def update_note(self, note_id: int, title: str, content: str, tags: str) -> None:
+    def update_note(self, note_id: int, title: str, content: str, tags: str, format_meta: str = "{}") -> None:
+        fm = self._normalize_format_meta(format_meta)
         self.db.execute(
-            "UPDATE notes SET title = ?, content = ?, tags = ? WHERE id = ?",
-            (title, content, tags, note_id)
+            "UPDATE notes SET title = ?, content = ?, tags = ?, format_meta = ? WHERE id = ?",
+            (title, content, tags, fm, note_id)
         )
 
-    # Delete
     def delete_note(self, note_id: int) -> None:
         self.db.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+
+    def export_note_md(self, note_id: int, path: str) -> None:
+        note = self.get_note_by_id(note_id)
+        if not note:
+            raise ValueError("Заметка не найдена")
+        _id, title, content, tags, created_at, _ = note
+        title_text = title or "(без заголовка)"
+        lines = [
+            f"# {title_text}",
+            "",
+            f"- ID: {_id}",
+            f"- Создано: {created_at}",
+            f"- Теги: {tags or ''}",
+            "",
+            content or ""
+        ]
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+    def export_note_html(self, note_id: int, path: str) -> None:
+        note = self.get_note_by_id(note_id)
+        if not note:
+            raise ValueError("Заметка не найдена")
+        _id, title, content, tags, created_at, _ = note
+        title_safe = html.escape(title or "(без заголовка)")
+        content_safe = html.escape(content or "").replace("\n", "<br>\n")
+        tags_safe = html.escape(tags or "")
+        created_safe = html.escape(created_at or "")
+        html_doc = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>{title_safe}</title>
+<style>
+body {{ font-family: Segoe UI, Arial, sans-serif; max-width: 900px; margin: 2rem auto; color: #222; }}
+.meta {{ color: #555; font-size: 0.9rem; margin-bottom: 0.8rem; }}
+.content {{ margin-top: 1rem; line-height: 1.6; }}
+hr {{ margin: 1rem 0; }}
+</style>
+</head>
+<body>
+<h1>{title_safe}</h1>
+<div class="meta">
+  <div><strong>ID:</strong> {_id}</div>
+  <div><strong>Создано:</strong> {created_safe}</div>
+  <div><strong>Теги:</strong> {tags_safe}</div>
+</div>
+<hr>
+<div class="content">
+  {content_safe}
+</div>
+</body>
+</html>
+"""
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html_doc)
+
+    def _normalize_format_meta(self, fm) -> str:
+        if fm is None:
+            return "{}"
+        if isinstance(fm, dict):
+            try:
+                return json.dumps(fm, ensure_ascii=False)
+            except Exception:
+                return "{}"
+        if isinstance(fm, str):
+            try:
+                json.loads(fm)
+                return fm
+            except Exception:
+                return "{}"
+        return "{}"
 
 
 --- FILE: ui\debug_ui.py ---
@@ -622,20 +718,224 @@ class RacconApp:
 
 
 --- FILE: ui\notes_ui.py ---
+# ui/notes_ui.py
+import json
+import os
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 
+# ---------- floating formatting panel implemented as borderless Toplevel ----------
+class FloatingFormattingPanel(tk.Toplevel):
+    WIDTH = 260
+    PADDING = 8
+
+    def __init__(self, editor_win: tk.Toplevel, text_widget: tk.Text, format_meta: dict):
+        super().__init__(editor_win)
+        self.editor_win = editor_win
+        self.text = text_widget
+        self.format_meta = format_meta or {}
+        self.pinned = False
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)   # показываем поверх, чтобы не терялась
+        self.withdraw()
+        self.configure(background="#f0f0f0")
+        self._build_ui()
+        self._ensure_tags()
+        self._bound_tag = None   # хранит id binding, чтобы можно было снять именно его
+
+        # если окно редактора закроется — закрываем панель
+        try:
+            self.editor_win.bind("<Destroy>", lambda e: self.destroy(), add="+")
+        except Exception:
+            pass
+
+        # позиционируем один раз кратко после создания
+        self.after(10, self._position_right_of_editor)
+
+    def _build_ui(self):
+        frm = ttk.Frame(self, padding=self.PADDING)
+        frm.pack(fill="both", expand=True)
+        header = ttk.Frame(frm)
+        header.pack(fill="x")
+        ttk.Label(header, text="Форматирование", font=("", 10, "bold")).pack(side="left", anchor="w")
+        self.pin_btn = ttk.Button(header, text="Pin", width=6, command=self._toggle_pin)
+        self.pin_btn.pack(side="right")
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=(6, 8))
+        ttk.Button(frm, text="Жирный", command=lambda: self.apply_style("bold")).pack(fill="x", pady=4)
+        ttk.Button(frm, text="Курсив", command=lambda: self.apply_style("italic")).pack(fill="x", pady=4)
+        ttk.Button(frm, text="Подчёрк.", command=lambda: self.apply_style("underline")).pack(fill="x", pady=4)
+        ttk.Button(frm, text="Зачёрк.", command=lambda: self.apply_style("strike")).pack(fill="x", pady=4)
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=(8, 8))
+        ttk.Button(frm, text="Очистить мета", command=self.clear_meta).pack(fill="x", pady=4)
+        ttk.Button(frm, text="Закрыть", command=self.hide).pack(fill="x", pady=(8, 0))
+
+    def _ensure_tags(self):
+        self.text.tag_configure("fmt_bold", font=("Segoe UI", 10, "bold"))
+        self.text.tag_configure("fmt_italic", font=("Segoe UI", 10, "italic"))
+        self.text.tag_configure("fmt_underline", underline=1)
+        self.text.tag_configure("fmt_strike", overstrike=1)
+
+    def _position_right_of_editor(self):
+        try:
+            ex = self.editor_win.winfo_rootx()
+            ey = self.editor_win.winfo_rooty()
+            ew = self.editor_win.winfo_width()
+            eh = self.editor_win.winfo_height()
+            if ew <= 1 or eh <= 1:
+                # ещё неинициализированы размеры — отложим чуть
+                self.after(20, self._position_right_of_editor)
+                return
+            px = ex + ew + 6
+            py = ey
+            self.geometry(f"{self.WIDTH}x{eh}+{px}+{py}")
+            self.lift()
+        except Exception:
+            pass
+
+    def show(self):
+        # позиционируем и показываем без задержек
+        self._position_right_of_editor()
+        self.deiconify()
+        self.lift()
+        self._apply_all_meta_tags()
+
+    def hide(self):
+        try:
+            self.withdraw()
+        except Exception:
+            pass
+
+    def _toggle_pin(self):
+        self.pinned = not self.pinned
+        self.pin_btn.config(text="Unpin" if self.pinned else "Pin")
+        if self.pinned:
+            # навешиваем привязку, используя add="+" и сохраняем id (совместимо с Python/Tk)
+            # в некоторых системах bind возвращает строк id, в некоторых None; храним обёртку
+            def on_conf(event):
+                self._position_right_of_editor()
+            # сохраняем обёртку, чтобы потом снимать
+            self._bound_handler = on_conf
+            self.editor_win.bind("<Configure>", on_conf, add="+")
+            # следим за движением мыши по заголовку (интерактивное перемещение)
+            self.editor_win.bind("<Map>", on_conf, add="+")
+            # сразу позиционируем
+            self._position_right_of_editor()
+        else:
+            # снимаем все наши добавленные обработчики с помощью unbind с функцией — безопасно в Tk 8.6+
+            try:
+                self.editor_win.unbind("<Configure>", funcid=str(self._bound_handler))
+            except Exception:
+                # максимально надёжный вариант — снять все обработчики (не идеал, но надёжно)
+                try:
+                    self.editor_win.unbind("<Configure>")
+                except Exception:
+                    pass
+            # удаляем map handler аналогично
+            try:
+                self.editor_win.unbind("<Map>")
+            except Exception:
+                pass
+
+    # ---- format meta helpers (как раньше) ----
+    def _index_to_offset(self, idx):
+        line, col = map(int, str(idx).split("."))
+        offset = 0
+        for l in range(1, line):
+            line_text = self.text.get(f"{l}.0", f"{l}.end")
+            offset += len(line_text) + 1
+        offset += col
+        return offset
+
+    def _offset_to_index(self, offset):
+        line = 1
+        while True:
+            line_text = self.text.get(f"{line}.0", f"{line}.end")
+            line_len = len(line_text) + 1
+            if offset < line_len:
+                col = offset
+                return f"{line}.{col}"
+            offset -= line_len
+            line += 1
+
+    def _get_selection_bounds_offsets(self):
+        try:
+            s = self.text.index("sel.first")
+            e = self.text.index("sel.last")
+        except tk.TclError:
+            return None
+        return self._index_to_offset(s), self._index_to_offset(e)
+
+    def _record_range(self, style, start_off, end_off):
+        if start_off >= end_off:
+            return
+        lst = self.format_meta.get(style, [])
+        lst.append([start_off, end_off])
+        self.format_meta[style] = lst
+        self._apply_meta_tag(style, start_off, end_off)
+
+    def apply_style(self, style_key):
+        bounds = self._get_selection_bounds_offsets()
+        if not bounds:
+            messagebox.showinfo("Форматирование", "Выделите фрагмент текста для форматирования")
+            return
+        start_off, end_off = bounds
+        self._record_range(style_key, start_off, end_off)
+
+    def clear_meta(self):
+        if not messagebox.askyesno("Очистка", "Удалить все метаданные форматирования?"):
+            return
+        self.format_meta.clear()
+        self._remove_all_meta_tags()
+        messagebox.showinfo("Очистка", "Метаданные удалены")
+
+    def _apply_meta_tag(self, style, start_off, end_off):
+        tag = self._style_to_tag(style)
+        try:
+            start_idx = self._offset_to_index(start_off)
+            end_idx = self._offset_to_index(end_off)
+            self.text.tag_add(tag, start_idx, end_idx)
+        except Exception:
+            pass
+
+    def _apply_all_meta_tags(self):
+        self._remove_all_meta_tags()
+        for style, ranges in self.format_meta.items():
+            for r in ranges:
+                try:
+                    self._apply_meta_tag(style, int(r[0]), int(r[1]))
+                except Exception:
+                    pass
+
+    def _remove_all_meta_tags(self):
+        for tag in ("fmt_bold", "fmt_italic", "fmt_underline", "fmt_strike"):
+            try:
+                self.text.tag_remove(tag, "1.0", "end")
+            except Exception:
+                pass
+
+    def _style_to_tag(self, style):
+        return {
+            "bold": "fmt_bold",
+            "italic": "fmt_italic",
+            "underline": "fmt_underline",
+            "strike": "fmt_strike"
+        }.get(style, "fmt_bold")
+
+    def get_format_meta_json(self):
+        return json.dumps(self.format_meta, ensure_ascii=False)
+
+
+
+# ----------------- NotesUI (редактор с floating panel) -----------------
 class NotesUI:
     def __init__(self, master, notes_service):
         self.master = master
         self.notes_service = notes_service
-
         self.frame = ttk.Frame(master)
 
-        # Верхняя панель
         control = ttk.Frame(self.frame)
-        control.pack(fill="x", padx=6, pady=6)
+        control.pack(fill="x", padx=8, pady=8)
 
         ttk.Label(control, text="Заголовок:").pack(side="left")
         self.title_entry = ttk.Entry(control, width=30)
@@ -654,14 +954,21 @@ class NotesUI:
         ttk.Button(control, text="Искать", command=self.search_notes).pack(side="left", padx=6)
         ttk.Button(control, text="Сброс", command=self.load_notes).pack(side="left", padx=6)
 
-        # Таблица
+        table_frame = ttk.Frame(self.frame)
+        table_frame.pack(fill="both", expand=True, padx=8, pady=6)
+
         self.tree = ttk.Treeview(
-            self.frame,
+            table_frame,
             columns=("id", "title", "tags", "created_at"),
             show="headings",
-            height=15
+            height=16
         )
-        self.tree.pack(fill="both", expand=True, padx=6, pady=6)
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
 
         self.tree.heading("id", text="ID")
         self.tree.heading("title", text="Заголовок")
@@ -669,13 +976,14 @@ class NotesUI:
         self.tree.heading("created_at", text="Создано")
 
         self.tree.column("id", width=60, anchor="center")
-        self.tree.column("title", width=320, anchor="w")
-        self.tree.column("tags", width=160, anchor="w")
+        self.tree.column("title", width=360, anchor="w")
+        self.tree.column("tags", width=180, anchor="w")
         self.tree.column("created_at", width=160, anchor="center")
 
-        # Нижняя панель
+        self.tree.bind("<Double-1>", self._on_double_click)
+
         bottom = ttk.Frame(self.frame)
-        bottom.pack(fill="x", padx=6, pady=6)
+        bottom.pack(fill="x", padx=8, pady=8)
 
         ttk.Button(bottom, text="Удалить", command=self.delete_note).pack(side="left")
         ttk.Button(bottom, text="Просмотр", command=self.view_note).pack(side="left", padx=6)
@@ -683,7 +991,10 @@ class NotesUI:
 
         self.load_notes()
 
-    # CRUD и поиск
+    def get_frame(self):
+        return self.frame
+
+    # ---------------- CRUD и поиск ----------------
     def load_notes(self):
         for row in self.tree.get_children():
             self.tree.delete(row)
@@ -705,6 +1016,7 @@ class NotesUI:
             self.notes_service.create_note(title, "", tags)
             self.title_entry.delete(0, "end")
             self.tags_entry.delete(0, "end")
+            self.title_entry.focus_set()
             self.load_notes()
         except Exception as e:
             messagebox.showerror("Ошибка", str(e))
@@ -718,6 +1030,9 @@ class NotesUI:
             results = self.notes_service.search_notes(q)
             for row in self.tree.get_children():
                 self.tree.delete(row)
+            if not results:
+                messagebox.showinfo("Поиск", "Ничего не найдено")
+                return
             for note in results:
                 self.tree.insert("", "end", values=note)
         except Exception as e:
@@ -729,11 +1044,12 @@ class NotesUI:
             messagebox.showwarning("Ошибка", "Выберите заметку для удаления")
             return
         note_id = self.tree.item(sel[0])["values"][0]
-        try:
-            self.notes_service.delete_note(note_id)
-            self.load_notes()
-        except Exception as e:
-            messagebox.showerror("Ошибка", str(e))
+        if messagebox.askyesno("Подтвердите", "Удалить выбранную заметку?"):
+            try:
+                self.notes_service.delete_note(note_id)
+                self.load_notes()
+            except Exception as e:
+                messagebox.showerror("Ошибка", str(e))
 
     def view_note(self):
         sel = self.tree.selection()
@@ -743,12 +1059,17 @@ class NotesUI:
         note_id = self.tree.item(sel[0])["values"][0]
         try:
             note = self.notes_service.get_note_by_id(note_id)
-            if note:
+            if not note:
+                messagebox.showerror("Ошибка", "Заметка не найдена")
+                return
+            if len(note) == 6:
+                _, title, content, tags, created_at, _ = note
+            else:
                 _, title, content, tags, created_at = note
-                messagebox.showinfo(
-                    "Заметка",
-                    f"Заголовок: {title}\nТеги: {tags}\nСоздано: {created_at}\n\n{content}"
-                )
+            messagebox.showinfo(
+                "Заметка",
+                f"Заголовок: {title}\nТеги: {tags}\nСоздано: {created_at}\n\n{content}"
+            )
         except Exception as e:
             messagebox.showerror("Ошибка", str(e))
 
@@ -760,42 +1081,143 @@ class NotesUI:
         note_id = self.tree.item(sel[0])["values"][0]
         note = self.notes_service.get_note_by_id(note_id)
         if not note:
+            messagebox.showerror("Ошибка", "Заметка не найдена")
             return
 
-        _, old_title, old_content, old_tags, _ = note
+        if len(note) == 6:
+            _, title, content, tags, created_at, format_meta = note
+        else:
+            _, title, content, tags, created_at = note
+            format_meta = "{}"
 
-        win = tk.Toplevel(self.frame)
+        # working meta dict
+        try:
+            local_format_meta = json.loads(format_meta or "{}")
+        except Exception:
+            local_format_meta = {}
+
+        # editor window
+        win = tk.Toplevel(self.master)
         win.title("Редактировать заметку")
-        win.geometry("480x380")
+        win.geometry("920x560")
+        win.transient(self.master)
 
-        tk.Label(win, text="Заголовок:").pack(anchor="w", padx=8, pady=(8, 0))
-        title_entry = tk.Entry(win, width=60)
-        title_entry.insert(0, old_title)
-        title_entry.pack(padx=8, pady=4)
+        container = ttk.Frame(win)
+        container.pack(fill="both", expand=True, padx=8, pady=8)
 
-        tk.Label(win, text="Теги:").pack(anchor="w", padx=8, pady=(8, 0))
-        tags_entry = tk.Entry(win, width=60)
-        tags_entry.insert(0, old_tags)
-        tags_entry.pack(padx=8, pady=4)
+        # left: editor area
+        editor_frame = ttk.Frame(container)
+        editor_frame.pack(side="left", fill="both", expand=True)
 
-        tk.Label(win, text="Содержимое:").pack(anchor="w", padx=8, pady=(8, 0))
-        content_text = tk.Text(win, width=60, height=12)
-        content_text.insert("1.0", old_content)
-        content_text.pack(padx=8, pady=4)
+        top_fields = ttk.Frame(editor_frame)
+        top_fields.pack(fill="x", padx=4, pady=(0, 6))
 
-        def save_changes():
+        ttk.Label(top_fields, text="Заголовок:").grid(row=0, column=0, sticky="w")
+        title_entry = ttk.Entry(top_fields)
+        title_entry.grid(row=0, column=1, sticky="ew", padx=8)
+        title_entry.insert(0, title or "")
+        top_fields.columnconfigure(1, weight=1)
+
+        ttk.Label(top_fields, text="Теги:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        tags_entry = ttk.Entry(top_fields)
+        tags_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=(6, 0))
+        tags_entry.insert(0, tags or "")
+
+        content_frame = ttk.Frame(editor_frame)
+        content_frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        text_area = tk.Text(content_frame, wrap="word")
+        text_area.pack(side="left", fill="both", expand=True)
+        text_area.insert("1.0", content or "")
+
+        text_vsb = ttk.Scrollbar(content_frame, orient="vertical", command=text_area.yview)
+        text_vsb.pack(side="right", fill="y")
+        text_area.configure(yscrollcommand=text_vsb.set)
+
+        # create floating formatting panel (hidden by default)
+        panel = FloatingFormattingPanel(win, text_area, local_format_meta)
+
+        # footer
+        footer = ttk.Frame(win)
+        footer.pack(fill="x", padx=12, pady=(6, 10))
+
+        left_box = ttk.Frame(footer)
+        left_box.pack(side="left")
+
+        def export_md():
+            path = filedialog.asksaveasfilename(title="Сохранить как Markdown", defaultextension=".md",
+                                                filetypes=[("Markdown", "*.md"), ("Все файлы", "*.*")])
+            if not path:
+                return
+            try:
+                cur_title = title_entry.get().strip()
+                cur_tags = tags_entry.get().strip()
+                cur_content = text_area.get("1.0", "end-1c")
+                self.notes_service.update_note(note_id, cur_title, cur_content, cur_tags, panel.get_format_meta_json())
+                self.notes_service.export_note_md(note_id, path)
+                messagebox.showinfo("Экспорт", f"Сохранено: {path}")
+            except Exception as e:
+                messagebox.showerror("Экспорт", f"Ошибка: {e}")
+
+        def export_html():
+            path = filedialog.asksaveasfilename(title="Сохранить как HTML", defaultextension=".html",
+                                                filetypes=[("HTML", "*.html"), ("Все файлы", "*.*")])
+            if not path:
+                return
+            try:
+                cur_title = title_entry.get().strip()
+                cur_tags = tags_entry.get().strip()
+                cur_content = text_area.get("1.0", "end-1c")
+                self.notes_service.update_note(note_id, cur_title, cur_content, cur_tags, panel.get_format_meta_json())
+                self.notes_service.export_note_html(note_id, path)
+                messagebox.showinfo("Экспорт", f"Сохранено: {path}")
+            except Exception as e:
+                messagebox.showerror("Экспорт", f"Ошибка: {e}")
+
+        ttk.Button(left_box, text="Экспорт MD", command=export_md).pack(side="left", padx=(0, 8))
+        ttk.Button(left_box, text="Экспорт HTML", command=export_html).pack(side="left", padx=(0, 8))
+
+        # toggle floating panel: show/hide; user can Pin to keep it attached
+        def toggle_panel():
+            if panel.state() == "normal":
+                panel.hide()
+            else:
+                panel.show()
+
+        ttk.Button(left_box, text="Редакт.", command=toggle_panel).pack(side="left")
+
+        right_box = ttk.Frame(footer)
+        right_box.pack(side="right")
+
+        def save_and_close():
             new_title = title_entry.get().strip()
             new_tags = tags_entry.get().strip()
-            new_content = content_text.get("1.0", "end").strip()
+            new_content = text_area.get("1.0", "end-1c")
             if not new_title:
                 messagebox.showwarning("Ошибка", "Заголовок не может быть пустым")
                 return
             try:
-                self.notes_service.update_note(note_id, new_title, new_content, new_tags)
+                self.notes_service.update_note(note_id, new_title, new_content, new_tags, panel.get_format_meta_json())
                 self.load_notes()
+                # make sure panel destroyed
+                try:
+                    panel.destroy()
+                except Exception:
+                    pass
                 win.destroy()
             except Exception as e:
                 messagebox.showerror("Ошибка", str(e))
 
-        tk.Button(win, text="Сохранить", command=save_changes).pack(pady=10)
+        ttk.Button(right_box, text="Сохранить", command=save_and_close).pack(side="right", padx=6)
+        ttk.Button(right_box, text="Отмена", command=lambda: (panel.destroy(), win.destroy())).pack(side="right")
+
+        # show preview immediately if meta exists
+        panel._apply_all_meta_tags()
+        title_entry.focus_set()
+
+    def _on_double_click(self, event):
+        sel = self.tree.identify_row(event.y)
+        if sel:
+            self.tree.selection_set(sel)
+            self.edit_note()
 
