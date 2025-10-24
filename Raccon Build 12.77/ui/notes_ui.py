@@ -1,60 +1,142 @@
 # ui/notes_ui.py
 import json
-import os
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 
-# ---------- floating formatting panel implemented as borderless Toplevel ----------
-class FloatingFormattingPanel(tk.Toplevel):
-    WIDTH = 260
-    PADDING = 8
+class FormattingPanel(tk.Toplevel):
+    """Полноценное окно форматирования: рамка, заголовок, Pin/Unpin.
+    При Pin панель следует за окном редактора через быстрый Configure-обработчик.
+    """
+    WIDTH = 300
 
-    def __init__(self, editor_win: tk.Toplevel, text_widget: tk.Text, format_meta: dict):
+    def __init__(self, editor_win: tk.Toplevel, text_widget: tk.Text, format_meta: dict | None):
         super().__init__(editor_win)
         self.editor_win = editor_win
         self.text = text_widget
         self.format_meta = format_meta or {}
         self.pinned = False
-        self.overrideredirect(True)
-        self.attributes("-topmost", True)   # показываем поверх, чтобы не терялась
-        self.withdraw()
-        self.configure(background="#f0f0f0")
-        self._build_ui()
-        self._ensure_tags()
-        self._bound_tag = None   # хранит id binding, чтобы можно было снять именно его
+        self._following = False
 
-        # если окно редактора закроется — закрываем панель
+        self.title("Панель редактирования")
+        self.geometry(f"{self.WIDTH}x420")
+        self.protocol("WM_DELETE_WINDOW", self.hide)
+        self.withdraw()  # скрыта по умолчанию
+
+        # если редактор закроется — закрыть панель
         try:
             self.editor_win.bind("<Destroy>", lambda e: self.destroy(), add="+")
         except Exception:
             pass
 
-        # позиционируем один раз кратко после создания
-        self.after(10, self._position_right_of_editor)
+        self._build_ui()
+        self._ensure_tags()
 
     def _build_ui(self):
-        frm = ttk.Frame(self, padding=self.PADDING)
+        frm = ttk.Frame(self, padding=8)
         frm.pack(fill="both", expand=True)
+
         header = ttk.Frame(frm)
-        header.pack(fill="x")
-        ttk.Label(header, text="Форматирование", font=("", 10, "bold")).pack(side="left", anchor="w")
-        self.pin_btn = ttk.Button(header, text="Pin", width=6, command=self._toggle_pin)
+        header.pack(fill="x", pady=(0, 8))
+        ttk.Label(header, text="Панель форматирования", font=("", 10, "bold")).pack(side="left")
+        self.pin_btn = ttk.Button(header, text="Pin", width=8, command=self._toggle_pin)
         self.pin_btn.pack(side="right")
+
         ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=(6, 8))
+
         ttk.Button(frm, text="Жирный", command=lambda: self.apply_style("bold")).pack(fill="x", pady=4)
         ttk.Button(frm, text="Курсив", command=lambda: self.apply_style("italic")).pack(fill="x", pady=4)
-        ttk.Button(frm, text="Подчёрк.", command=lambda: self.apply_style("underline")).pack(fill="x", pady=4)
-        ttk.Button(frm, text="Зачёрк.", command=lambda: self.apply_style("strike")).pack(fill="x", pady=4)
+        ttk.Button(frm, text="Подчёркнутый", command=lambda: self.apply_style("underline")).pack(fill="x", pady=4)
+        ttk.Button(frm, text="Зачёркнутый", command=lambda: self.apply_style("strike")).pack(fill="x", pady=4)
+
         ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=(8, 8))
-        ttk.Button(frm, text="Очистить мета", command=self.clear_meta).pack(fill="x", pady=4)
-        ttk.Button(frm, text="Закрыть", command=self.hide).pack(fill="x", pady=(8, 0))
+        ttk.Button(frm, text="Очистить формат", command=self.clear_meta).pack(fill="x", pady=4)
+        ttk.Button(frm, text="Закрыть панель", command=self.hide).pack(fill="x", pady=(8, 0))
 
     def _ensure_tags(self):
-        self.text.tag_configure("fmt_bold", font=("Segoe UI", 10, "bold"))
-        self.text.tag_configure("fmt_italic", font=("Segoe UI", 10, "italic"))
-        self.text.tag_configure("fmt_underline", underline=1)
-        self.text.tag_configure("fmt_strike", overstrike=1)
+        # Настройки тегов для визуального форматирования
+        try:
+            self.text.tag_configure("fmt_bold", font=("Segoe UI", 10, "bold"))
+            self.text.tag_configure("fmt_italic", font=("Segoe UI", 10, "italic"))
+            self.text.tag_configure("fmt_underline", underline=1)
+            self.text.tag_configure("fmt_strike", overstrike=1)
+        except Exception:
+            pass
+
+    # ------------- Pin / follow logic -------------
+    def _toggle_pin(self):
+        self.pinned = not self.pinned
+        self.pin_btn.config(text="Unpin" if self.pinned else "Pin")
+        if self.pinned:
+            try:
+                self.transient(self.editor_win)
+            except Exception:
+                pass
+            self._start_following_editor()
+        else:
+            try:
+                self.transient(None)
+            except Exception:
+                pass
+            self._stop_following_editor()
+
+    def _start_following_editor(self):
+        if self._following:
+            return
+        self._following = True
+
+        def _on_editor_configure(event=None):
+            try:
+                # гарантируем свежие размеры и позиции
+                self.editor_win.update_idletasks()
+                ex = self.editor_win.winfo_rootx()
+                ey = self.editor_win.winfo_rooty()
+                ew = self.editor_win.winfo_width()
+                eh = self.editor_win.winfo_height()
+                if ew <= 1 or eh <= 1:
+                    return
+                px = ex + ew + 10
+                py = ey
+                # минимальная работа: только geometry, без лишней логики
+                self.geometry(f"{self.WIDTH}x{eh}+{px}+{py}")
+            except Exception:
+                pass
+
+        # сохраняем функцию-обработчик на объекте, чтобы можно было отписаться (best-effort)
+        self._editor_configure_handler = _on_editor_configure
+        try:
+            # bind с add="+" — не уничтожаем другие обработчики
+            self.editor_win.bind("<Configure>", self._editor_configure_handler, add="+")
+            # позиционируем сразу
+            self._editor_configure_handler()
+        except Exception:
+            # fallback: всё ещё показываем панель, но без бинда
+            try:
+                self._position_right_of_editor()
+            except Exception:
+                pass
+
+    def _stop_following_editor(self):
+        if not self._following:
+            return
+        self._following = False
+        # Попытка удалить конкретный обработчик; tkinter не всегда позволяет удалить конкретную функцию,
+        # поэтому выполняем best-effort: unbind всех Configure (редко критично) и затем можем восстановить
+        try:
+            # если мы в состоянии точно удалить только наш биндинг, попытаемся (не гарантируется)
+            self.editor_win.unbind("<Configure>", self._editor_configure_handler)
+        except Exception:
+            try:
+                # безопасный, но грубый вариант: убираем все обработчики Configure
+                self.editor_win.unbind("<Configure>")
+            except Exception:
+                pass
+        finally:
+            if hasattr(self, "_editor_configure_handler"):
+                try:
+                    del self._editor_configure_handler
+                except Exception:
+                    pass
 
     def _position_right_of_editor(self):
         try:
@@ -63,62 +145,26 @@ class FloatingFormattingPanel(tk.Toplevel):
             ew = self.editor_win.winfo_width()
             eh = self.editor_win.winfo_height()
             if ew <= 1 or eh <= 1:
-                # ещё неинициализированы размеры — отложим чуть
-                self.after(20, self._position_right_of_editor)
+                self.after(30, self._position_right_of_editor)
                 return
-            px = ex + ew + 6
+            px = ex + ew + 10
             py = ey
             self.geometry(f"{self.WIDTH}x{eh}+{px}+{py}")
-            self.lift()
         except Exception:
             pass
 
     def show(self):
-        # позиционируем и показываем без задержек
-        self._position_right_of_editor()
+        if self.pinned:
+            self._position_right_of_editor()
         self.deiconify()
         self.lift()
         self._apply_all_meta_tags()
 
     def hide(self):
-        try:
-            self.withdraw()
-        except Exception:
-            pass
+        self.withdraw()
 
-    def _toggle_pin(self):
-        self.pinned = not self.pinned
-        self.pin_btn.config(text="Unpin" if self.pinned else "Pin")
-        if self.pinned:
-            # навешиваем привязку, используя add="+" и сохраняем id (совместимо с Python/Tk)
-            # в некоторых системах bind возвращает строк id, в некоторых None; храним обёртку
-            def on_conf(event):
-                self._position_right_of_editor()
-            # сохраняем обёртку, чтобы потом снимать
-            self._bound_handler = on_conf
-            self.editor_win.bind("<Configure>", on_conf, add="+")
-            # следим за движением мыши по заголовку (интерактивное перемещение)
-            self.editor_win.bind("<Map>", on_conf, add="+")
-            # сразу позиционируем
-            self._position_right_of_editor()
-        else:
-            # снимаем все наши добавленные обработчики с помощью unbind с функцией — безопасно в Tk 8.6+
-            try:
-                self.editor_win.unbind("<Configure>", funcid=str(self._bound_handler))
-            except Exception:
-                # максимально надёжный вариант — снять все обработчики (не идеал, но надёжно)
-                try:
-                    self.editor_win.unbind("<Configure>")
-                except Exception:
-                    pass
-            # удаляем map handler аналогично
-            try:
-                self.editor_win.unbind("<Map>")
-            except Exception:
-                pass
-
-    # ---- format meta helpers (как раньше) ----
-    def _index_to_offset(self, idx):
+    # ------------- форматирование метаданных -------------
+    def _index_to_offset(self, idx: str) -> int:
         line, col = map(int, str(idx).split("."))
         offset = 0
         for l in range(1, line):
@@ -127,7 +173,7 @@ class FloatingFormattingPanel(tk.Toplevel):
         offset += col
         return offset
 
-    def _offset_to_index(self, offset):
+    def _offset_to_index(self, offset: int) -> str:
         line = 1
         while True:
             line_text = self.text.get(f"{line}.0", f"{line}.end")
@@ -146,7 +192,7 @@ class FloatingFormattingPanel(tk.Toplevel):
             return None
         return self._index_to_offset(s), self._index_to_offset(e)
 
-    def _record_range(self, style, start_off, end_off):
+    def _record_range(self, style: str, start_off: int, end_off: int):
         if start_off >= end_off:
             return
         lst = self.format_meta.get(style, [])
@@ -154,10 +200,10 @@ class FloatingFormattingPanel(tk.Toplevel):
         self.format_meta[style] = lst
         self._apply_meta_tag(style, start_off, end_off)
 
-    def apply_style(self, style_key):
+    def apply_style(self, style_key: str):
         bounds = self._get_selection_bounds_offsets()
         if not bounds:
-            messagebox.showinfo("Форматирование", "Выделите фрагмент текста для форматирования")
+            messagebox.showinfo("Форматирование", "Выделите текст, который нужно отформатировать")
             return
         start_off, end_off = bounds
         self._record_range(style_key, start_off, end_off)
@@ -169,7 +215,7 @@ class FloatingFormattingPanel(tk.Toplevel):
         self._remove_all_meta_tags()
         messagebox.showinfo("Очистка", "Метаданные удалены")
 
-    def _apply_meta_tag(self, style, start_off, end_off):
+    def _apply_meta_tag(self, style: str, start_off: int, end_off: int):
         tag = self._style_to_tag(style)
         try:
             start_idx = self._offset_to_index(start_off)
@@ -194,7 +240,7 @@ class FloatingFormattingPanel(tk.Toplevel):
             except Exception:
                 pass
 
-    def _style_to_tag(self, style):
+    def _style_to_tag(self, style: str) -> str:
         return {
             "bold": "fmt_bold",
             "italic": "fmt_italic",
@@ -202,12 +248,11 @@ class FloatingFormattingPanel(tk.Toplevel):
             "strike": "fmt_strike"
         }.get(style, "fmt_bold")
 
-    def get_format_meta_json(self):
+    def get_format_meta_json(self) -> str:
         return json.dumps(self.format_meta, ensure_ascii=False)
 
 
-
-# ----------------- NotesUI (редактор с floating panel) -----------------
+# ---------------- NotesUI ----------------
 class NotesUI:
     def __init__(self, master, notes_service):
         self.master = master
@@ -370,13 +415,12 @@ class NotesUI:
             _, title, content, tags, created_at = note
             format_meta = "{}"
 
-        # working meta dict
         try:
-            local_format_meta = json.loads(format_meta or "{}")
+            original_meta = json.loads(format_meta or "{}")
         except Exception:
-            local_format_meta = {}
+            original_meta = {}
+        working_meta = json.loads(json.dumps(original_meta))
 
-        # editor window
         win = tk.Toplevel(self.master)
         win.title("Редактировать заметку")
         win.geometry("920x560")
@@ -385,7 +429,6 @@ class NotesUI:
         container = ttk.Frame(win)
         container.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # left: editor area
         editor_frame = ttk.Frame(container)
         editor_frame.pack(side="left", fill="both", expand=True)
 
@@ -414,15 +457,25 @@ class NotesUI:
         text_vsb.pack(side="right", fill="y")
         text_area.configure(yscrollcommand=text_vsb.set)
 
-        # create floating formatting panel (hidden by default)
-        panel = FloatingFormattingPanel(win, text_area, local_format_meta)
+        # панель форматирования — полноценное окно, скрыто по умолчанию
+        panel = FormattingPanel(win, text_area, working_meta)
 
-        # footer
         footer = ttk.Frame(win)
         footer.pack(fill="x", padx=12, pady=(6, 10))
 
         left_box = ttk.Frame(footer)
         left_box.pack(side="left")
+
+        def toggle_panel():
+            try:
+                if panel.state() == "normal":
+                    panel.hide()
+                else:
+                    panel.show()
+            except Exception:
+                panel.show()
+
+        ttk.Button(left_box, text="Редакт.", command=toggle_panel).pack(side="left")
 
         def export_md():
             path = filedialog.asksaveasfilename(title="Сохранить как Markdown", defaultextension=".md",
@@ -433,7 +486,9 @@ class NotesUI:
                 cur_title = title_entry.get().strip()
                 cur_tags = tags_entry.get().strip()
                 cur_content = text_area.get("1.0", "end-1c")
-                self.notes_service.update_note(note_id, cur_title, cur_content, cur_tags, panel.get_format_meta_json())
+                self.notes_service.update_note(
+                    note_id, cur_title, cur_content, cur_tags, panel.get_format_meta_json()
+                )
                 self.notes_service.export_note_md(note_id, path)
                 messagebox.showinfo("Экспорт", f"Сохранено: {path}")
             except Exception as e:
@@ -448,23 +503,16 @@ class NotesUI:
                 cur_title = title_entry.get().strip()
                 cur_tags = tags_entry.get().strip()
                 cur_content = text_area.get("1.0", "end-1c")
-                self.notes_service.update_note(note_id, cur_title, cur_content, cur_tags, panel.get_format_meta_json())
+                self.notes_service.update_note(
+                    note_id, cur_title, cur_content, cur_tags, panel.get_format_meta_json()
+                )
                 self.notes_service.export_note_html(note_id, path)
                 messagebox.showinfo("Экспорт", f"Сохранено: {path}")
             except Exception as e:
                 messagebox.showerror("Экспорт", f"Ошибка: {e}")
 
-        ttk.Button(left_box, text="Экспорт MD", command=export_md).pack(side="left", padx=(0, 8))
-        ttk.Button(left_box, text="Экспорт HTML", command=export_html).pack(side="left", padx=(0, 8))
-
-        # toggle floating panel: show/hide; user can Pin to keep it attached
-        def toggle_panel():
-            if panel.state() == "normal":
-                panel.hide()
-            else:
-                panel.show()
-
-        ttk.Button(left_box, text="Редакт.", command=toggle_panel).pack(side="left")
+        ttk.Button(left_box, text="Экспорт MD", command=export_md).pack(side="left", padx=(8, 8))
+        ttk.Button(left_box, text="Экспорт HTML", command=export_html).pack(side="left")
 
         right_box = ttk.Frame(footer)
         right_box.pack(side="right")
@@ -477,21 +525,28 @@ class NotesUI:
                 messagebox.showwarning("Ошибка", "Заголовок не может быть пустым")
                 return
             try:
-                self.notes_service.update_note(note_id, new_title, new_content, new_tags, panel.get_format_meta_json())
-                self.load_notes()
-                # make sure panel destroyed
+                self.notes_service.update_note(
+                    note_id, new_title, new_content, new_tags, panel.get_format_meta_json()
+                )
                 try:
                     panel.destroy()
                 except Exception:
                     pass
+                self.load_notes()
                 win.destroy()
             except Exception as e:
                 messagebox.showerror("Ошибка", str(e))
 
-        ttk.Button(right_box, text="Сохранить", command=save_and_close).pack(side="right", padx=6)
-        ttk.Button(right_box, text="Отмена", command=lambda: (panel.destroy(), win.destroy())).pack(side="right")
+        def cancel_and_close():
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+            win.destroy()
 
-        # show preview immediately if meta exists
+        ttk.Button(right_box, text="Сохранить", command=save_and_close).pack(side="right", padx=6)
+        ttk.Button(right_box, text="Отмена", command=cancel_and_close).pack(side="right")
+
         panel._apply_all_meta_tags()
         title_entry.focus_set()
 
