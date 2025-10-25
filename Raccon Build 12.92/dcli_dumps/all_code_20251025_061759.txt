@@ -1,6 +1,6 @@
 All project .py files dump
-Generated: 2025-10-24T13:28:07.095217
-Project root: c:\Users\Q#\Desktop\Raccon Build 12.22
+Generated: 2025-10-25T06:17:59.166315
+Project root: c:\Users\Q#\Desktop\Raccon Build 12.77
 
 
 --- FILE: main.py ---
@@ -725,10 +725,11 @@ from tkinter import ttk, messagebox, filedialog
 
 
 class FormattingPanel(tk.Toplevel):
-    """Полноценное окно форматирования: рамка, заголовок, Pin/Unpin.
-    При Pin панель следует за окном редактора через быстрый Configure-обработчик.
+    """Полноценное окно форматирования с Pin/Unpin.
+    При Pin панель следует за окном редактора, при этом сохраняет свой текущий размер.
     """
     WIDTH = 300
+    DEFAULT_HEIGHT = 420
 
     def __init__(self, editor_win: tk.Toplevel, text_widget: tk.Text, format_meta: dict | None):
         super().__init__(editor_win)
@@ -737,13 +738,14 @@ class FormattingPanel(tk.Toplevel):
         self.format_meta = format_meta or {}
         self.pinned = False
         self._following = False
+        self._editor_configure_handler = None
 
-        self.title("Панель редактирования")
-        self.geometry(f"{self.WIDTH}x420")
+        self.title("Панель форматирования")
+        self.geometry(f"{self.WIDTH}x{self.DEFAULT_HEIGHT}")
         self.protocol("WM_DELETE_WINDOW", self.hide)
         self.withdraw()  # скрыта по умолчанию
 
-        # если редактор закроется — закрыть панель
+        # Если редактор уничтожается — закрыть панель
         try:
             self.editor_win.bind("<Destroy>", lambda e: self.destroy(), add="+")
         except Exception:
@@ -774,7 +776,6 @@ class FormattingPanel(tk.Toplevel):
         ttk.Button(frm, text="Закрыть панель", command=self.hide).pack(fill="x", pady=(8, 0))
 
     def _ensure_tags(self):
-        # Настройки тегов для визуального форматирования
         try:
             self.text.tag_configure("fmt_bold", font=("Segoe UI", 10, "bold"))
             self.text.tag_configure("fmt_italic", font=("Segoe UI", 10, "italic"))
@@ -783,7 +784,7 @@ class FormattingPanel(tk.Toplevel):
         except Exception:
             pass
 
-    # ------------- Pin / follow logic -------------
+    # ---------------- Pin / follow logic ----------------
     def _toggle_pin(self):
         self.pinned = not self.pinned
         self.pin_btn.config(text="Unpin" if self.pinned else "Pin")
@@ -807,7 +808,6 @@ class FormattingPanel(tk.Toplevel):
 
         def _on_editor_configure(event=None):
             try:
-                # гарантируем свежие размеры и позиции
                 self.editor_win.update_idletasks()
                 ex = self.editor_win.winfo_rootx()
                 ey = self.editor_win.winfo_rooty()
@@ -815,22 +815,31 @@ class FormattingPanel(tk.Toplevel):
                 eh = self.editor_win.winfo_height()
                 if ew <= 1 or eh <= 1:
                     return
+                # сохраняем текущие размеры панели, чтобы не перезаписывать пользовательские настройки
+                try:
+                    cur_w = max(self.winfo_width(), 1)
+                    cur_h = max(self.winfo_height(), 1)
+                    if cur_w <= 1:
+                        cur_w = self.WIDTH
+                    if cur_h <= 1:
+                        cur_h = eh
+                except Exception:
+                    cur_w = self.WIDTH
+                    cur_h = eh
                 px = ex + ew + 10
                 py = ey
-                # минимальная работа: только geometry, без лишней логики
-                self.geometry(f"{self.WIDTH}x{eh}+{px}+{py}")
+                # Меняем только позицию, сохраняя размеры
+                self.geometry(f"{cur_w}x{cur_h}+{px}+{py}")
             except Exception:
                 pass
 
-        # сохраняем функцию-обработчик на объекте, чтобы можно было отписаться (best-effort)
+        # Сохраняем обработчик для возможности отписки
         self._editor_configure_handler = _on_editor_configure
         try:
-            # bind с add="+" — не уничтожаем другие обработчики
             self.editor_win.bind("<Configure>", self._editor_configure_handler, add="+")
-            # позиционируем сразу
             self._editor_configure_handler()
         except Exception:
-            # fallback: всё ещё показываем панель, но без бинда
+            # fallback: попытка позиционировать один раз
             try:
                 self._position_right_of_editor()
             except Exception:
@@ -840,23 +849,18 @@ class FormattingPanel(tk.Toplevel):
         if not self._following:
             return
         self._following = False
-        # Попытка удалить конкретный обработчик; tkinter не всегда позволяет удалить конкретную функцию,
-        # поэтому выполняем best-effort: unbind всех Configure (редко критично) и затем можем восстановить
         try:
-            # если мы в состоянии точно удалить только наш биндинг, попытаемся (не гарантируется)
-            self.editor_win.unbind("<Configure>", self._editor_configure_handler)
+            if self._editor_configure_handler:
+                # Попытка удалить конкретный обработчик; tkinter не всегда гарантирует удаление по ссылке
+                self.editor_win.unbind("<Configure>", self._editor_configure_handler)
         except Exception:
             try:
-                # безопасный, но грубый вариант: убираем все обработчики Configure
+                # Грубый fallback: удалить все Configure-обработчики
                 self.editor_win.unbind("<Configure>")
             except Exception:
                 pass
         finally:
-            if hasattr(self, "_editor_configure_handler"):
-                try:
-                    del self._editor_configure_handler
-                except Exception:
-                    pass
+            self._editor_configure_handler = None
 
     def _position_right_of_editor(self):
         try:
@@ -869,7 +873,18 @@ class FormattingPanel(tk.Toplevel):
                 return
             px = ex + ew + 10
             py = ey
-            self.geometry(f"{self.WIDTH}x{eh}+{px}+{py}")
+            # при первоначальном позиционировании используем текущие размеры панели
+            try:
+                cur_w = max(self.winfo_width(), 1)
+                cur_h = max(self.winfo_height(), 1)
+                if cur_w <= 1:
+                    cur_w = self.WIDTH
+                if cur_h <= 1:
+                    cur_h = eh
+            except Exception:
+                cur_w = self.WIDTH
+                cur_h = eh
+            self.geometry(f"{cur_w}x{cur_h}+{px}+{py}")
         except Exception:
             pass
 
@@ -883,7 +898,7 @@ class FormattingPanel(tk.Toplevel):
     def hide(self):
         self.withdraw()
 
-    # ------------- форматирование метаданных -------------
+    # ---------------- форматирование метаданных ----------------
     def _index_to_offset(self, idx: str) -> int:
         line, col = map(int, str(idx).split("."))
         offset = 0
@@ -1099,7 +1114,7 @@ class NotesUI:
     def view_note(self):
         sel = self.tree.selection()
         if not sel:
-            messagebox.showwarning("Ошибка", "Выберите заметку для просмотра")
+            self.tree.showwarning("Ошибка", "Выберите заметку для просмотра")
             return
         note_id = self.tree.item(sel[0])["values"][0]
         try:
